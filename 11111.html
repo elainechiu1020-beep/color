@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-Hant" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>03-02 顏色音樂播放器｜精準偵測版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tracking.js/1.1.3/tracking-min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet" />
+    <style>
+      body { font-family: Inter, sans-serif; }
+      .video-container { position: relative; display: inline-block; width: 100%; max-width: 640px; }
+      canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: auto; }
+      video { width: 100%; height: auto; display: block; }
+      .picking-mode canvas { cursor: crosshair !important; outline: 4px solid #f59e0b !important; }
+    </style>
+  </head>
+  <body class="min-h-screen bg-slate-950 p-6 text-slate-100">
+    <div class="mx-auto max-w-5xl">
+      <header class="mb-6 flex justify-between items-center">
+        <h1 class="text-2xl font-bold tracking-tight text-white">精準顏色控制器</h1>
+        <div id="fileName" class="text-xs text-slate-500 italic truncate max-w-xs">尚未載入音樂</div>
+      </header>
+
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="lg:col-span-2 space-y-4">
+          <div class="video-container mx-auto overflow-hidden rounded-2xl border border-slate-800 bg-black" id="videoWrapper">
+            <video id="video" width="640" height="480" playsinline muted></video>
+            <canvas id="canvas" width="640" height="480"></canvas>
+          </div>
+          <div class="flex gap-3">
+            <button id="start" class="flex-1 rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold transition hover:bg-indigo-500">啟動攝影機</button>
+            <button onclick="document.getElementById('fileInput').click()" class="flex-1 rounded-xl bg-slate-800 px-4 py-3 text-sm font-bold border border-slate-700 hover:bg-slate-700">載入 MP3</button>
+            <input type="file" id="fileInput" accept="audio/*" class="hidden" />
+          </div>
+          <audio id="myAudio" controls class="w-full opacity-60" loop></audio>
+        </div>
+
+        <div class="space-y-4">
+          <section class="rounded-2xl border border-slate-800 bg-slate-900/80 p-5">
+            <h2 class="mb-4 text-xs font-bold text-slate-400 uppercase tracking-widest">精細調教</h2>
+            
+            <div class="mb-6">
+              <div class="flex justify-between mb-2">
+                <label class="text-xs text-slate-300">偵測靈敏度 (Tolerance)</label>
+                <span id="tolVal" class="text-xs font-mono text-cyan-400">30</span>
+              </div>
+              <input type="range" id="tolSlider" min="10" max="80" value="30" class="w-full h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500">
+              <p class="mt-1 text-[10px] text-slate-500 italic">越小越精準，但對環境光要求越高。</p>
+            </div>
+
+            <hr class="border-slate-800 mb-6">
+
+            <div class="mb-6 space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold text-fuchsia-400">顏色 A (播放控制)</span>
+                <div id="previewA" class="w-5 h-5 rounded-full border border-white/30 bg-fuchsia-600"></div>
+              </div>
+              <button id="pickA" class="w-full py-2 rounded-lg bg-fuchsia-600/10 text-fuchsia-300 text-xs border border-fuchsia-500/20 hover:bg-fuchsia-600/20">重新取色 A</button>
+              <div id="statusA" class="text-[10px] font-mono text-center text-slate-500 uppercase tracking-tighter">Wait...</div>
+            </div>
+
+            <div class="space-y-3">
+              <div class="flex items-center justify-between">
+                <span class="text-xs font-bold text-cyan-400">顏色 B (音量控制)</span>
+                <div id="previewB" class="w-5 h-5 rounded-full border border-white/30 bg-cyan-600"></div>
+              </div>
+              <button id="pickB" class="w-full py-2 rounded-lg bg-cyan-600/10 text-cyan-300 text-xs border border-cyan-500/20 hover:bg-cyan-600/20">重新取色 B</button>
+              <div class="h-1.5 w-full bg-slate-800 rounded-full overflow-hidden mt-2">
+                <div id="volumeBar" class="h-full bg-cyan-500 w-0 transition-all"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const video = document.getElementById('video');
+      const canvas = document.getElementById('canvas');
+      const ctx = canvas.getContext('2d');
+      const audio = document.getElementById('myAudio');
+      const tolSlider = document.getElementById('tolSlider');
+      const tolVal = document.getElementById('tolVal');
+      const videoWrapper = document.getElementById('videoWrapper');
+
+      let targetA = { r: 255, g: 0, b: 255 };
+      let targetB = { r: 0, g: 255, b: 255 };
+      let currentTolerance = 30;
+      let pickingFor = null;
+      let isPlaying = false;
+
+      // --- 核心優化：更嚴格的顏色判定 ---
+      function registerPreciseColors() {
+        const tol = parseInt(currentTolerance);
+        
+        const checkColor = (r, g, b, target) => {
+          // 1. 歐幾里得距離判斷
+          const dist = Math.sqrt((r-target.r)**2 + (g-target.g)**2 + (b-target.b)**2);
+          if (dist > tol) return false;
+
+          // 2. 亮度過濾 (避免偵測到太黑或太白的雜訊)
+          const brightness = (r + g + b) / 3;
+          if (brightness < 30 || brightness > 230) return false;
+
+          return true;
+        };
+
+        tracking.ColorTracker.registerColor('colorA', (r, g, b) => checkColor(r, g, b, targetA));
+        tracking.ColorTracker.registerColor('colorB', (r, g, b) => checkColor(r, g, b, targetB));
+      }
+
+      registerPreciseColors();
+      const tracker = new tracking.ColorTracker(['colorA', 'colorB']);
+      tracker.setMinDimension(30); // 忽略面積小於 30x30 的雜訊點
+
+      // --- 事件處理 ---
+      tolSlider.oninput = () => {
+        currentTolerance = tolSlider.value;
+        tolVal.textContent = currentTolerance;
+        registerPreciseColors(); // 即時更新偵測標準
+      };
+
+      document.getElementById('pickA').onclick = () => { pickingFor = 'A'; videoWrapper.classList.add('picking-mode'); };
+      document.getElementById('pickB').onclick = () => { pickingFor = 'B'; videoWrapper.classList.add('picking-mode'); };
+
+      canvas.onmousedown = (e) => {
+        if (!pickingFor) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+        const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+        
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const p = ctx.getImageData(x, y, 1, 1).data;
+        const color = { r: p[0], g: p[1], b: p[2] };
+
+        if (pickingFor === 'A') {
+          targetA = color;
+          document.getElementById('previewA').style.backgroundColor = `rgb(${color.r},${color.g},${color.b})`;
+        } else {
+          targetB = color;
+          document.getElementById('previewB').style.backgroundColor = `rgb(${color.r},${color.g},${color.b})`;
+        }
+        
+        registerPreciseColors();
+        pickingFor = null;
+        videoWrapper.classList.remove('picking-mode');
+      };
+
+      // --- 追蹤邏輯 ---
+      let debounceA = 0;
+      let activeA = false;
+
+      tracker.on('track', (event) => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let foundA = false;
+        let bestB = null;
+
+        event.data.forEach((r) => {
+          ctx.strokeStyle = r.color === 'colorA' ? '#f0f' : '#0ff';
+          ctx.lineWidth = 3;
+          ctx.strokeRect(r.x, r.y, r.width, r.height);
+          
+          if (r.color === 'colorA') foundA = true;
+          if (r.color === 'colorB') if (!bestB || r.width > bestB.width) bestB = r;
+        });
+
+        if (foundA) {
+          debounceA++;
+          if (debounceA > 15 && !activeA) {
+            if (audio.src) {
+              isPlaying ? audio.pause() : audio.play();
+              isPlaying = !isPlaying;
+              document.getElementById('statusA').textContent = isPlaying ? "Playing" : "Paused";
+              document.getElementById('statusA').className = isPlaying ? "text-[10px] font-mono text-lime-400" : "text-[10px] font-mono text-amber-400";
+            }
+            activeA = true;
+          }
+        } else {
+          debounceA = 0;
+          activeA = false;
+        }
+
+        if (bestB) {
+          const dist = Math.sqrt((bestB.x+bestB.width/2 - 320)**2 + (bestB.y+bestB.height/2 - 240)**2);
+          const vol = Math.max(0, Math.min(1, 1 - (dist / 400)));
+          audio.volume = vol;
+          document.getElementById('volumeBar').style.width = `${vol*100}%`;
+        }
+      });
+
+      document.getElementById('start').onclick = async () => {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+        video.srcObject = stream;
+        video.play();
+        tracking.track('#video', tracker);
+      };
+
+      document.getElementById('fileInput').onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+          audio.src = URL.createObjectURL(file);
+          document.getElementById('fileName').textContent = file.name;
+        }
+      };
+    </script>
+  </body>
+</html>
